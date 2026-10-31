@@ -312,7 +312,7 @@ func doRequest[Resp any](
 	}
 	// Fully consumed bodies can be reused by the transport. Close unread bodies
 	// without draining: cleanup must not wait for an unbounded or stalled stream.
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
