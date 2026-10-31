@@ -2,6 +2,7 @@ package kakashi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -66,6 +67,13 @@ func TestCall_NotFound(t *testing.T) {
 
 func TestCallBody(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/users" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body User
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name != "Bob" {
+			t.Errorf("unexpected request body: %+v, error: %v", body, err)
+		}
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("expected Content-Type application/json, got %q", r.Header.Get("Content-Type"))
 		}
@@ -117,7 +125,7 @@ func TestCall_Headers(t *testing.T) {
 	defer ts.Close()
 
 	Get := NewEndpoint[struct{}](MethodGet, "/")
-	client := New(ts.URL, WithDefaultHeader("Authorization", "Bearer abc"))
+	client := New(ts.URL, WithDefaultHeader("Authorization", "Bearer abc"), WithDefaultHeader("X-Trace", "default"))
 
 	_, err := Call(context.Background(), client, Get, WithHeader("X-Trace", "xyz"))
 	if err != nil {
