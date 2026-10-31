@@ -247,6 +247,11 @@ func WithAllowEmptyResponse() RequestOption
 
 ## Testing
 
+GitHub Actions runs `go vet` and the test suite with race detection and coverage
+on pull requests and pushes to `main`, using Go 1.25.6 (the minimum version in
+`go.mod`) and the latest stable Go release. The CI workflow also supports manual
+runs.
+
 ```sh
 go test ./...
 ```
