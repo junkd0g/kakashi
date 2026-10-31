@@ -58,6 +58,7 @@ const maxErrorBody = 64 << 10
 
 // APIError is returned when the server responds with a non-2xx status code.
 // Callers can use errors.As to extract it and branch on StatusCode.
+// URL omits user information, query parameters, and fragments.
 type APIError struct {
 	StatusCode int
 	Status     string
@@ -66,7 +67,20 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("kakashi: %s returned %s", e.URL, e.Status)
+	return fmt.Sprintf("kakashi: %s returned %s", safeURL(e.URL), e.Status)
+}
+
+func safeURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[invalid URL]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String()
 }
 
 // Endpoint is a body-less HTTP endpoint that returns a value of type Resp.
@@ -107,12 +121,14 @@ type Client struct {
 // Option configures a Client during construction.
 type Option func(*Client)
 
-// WithHTTPClient replaces the default *http.Client. Use this to control
-// transport, redirect policy, cookie jar, etc.
+// WithHTTPClient copies h's configuration, sharing its transport, redirect
+// policy, and cookie jar. Later options do not mutate h. Options apply in order:
+// put WithTimeout after WithHTTPClient to override h's timeout.
 func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) {
 		if h != nil {
-			c.HTTPClient = h
+			client := *h
+			c.HTTPClient = &client
 		}
 	}
 }
@@ -154,10 +170,11 @@ func New(baseURL string, opts ...Option) *Client {
 type RequestOption func(*requestConfig)
 
 type requestConfig struct {
-	headers http.Header
-	query   url.Values
-	rawBody io.Reader
-	rawCT   string
+	headers            http.Header
+	query              url.Values
+	rawBody            io.Reader
+	rawCT              string
+	allowEmptyResponse bool
 }
 
 // WithHeader sets a header on a single request, overriding any client default.
@@ -172,7 +189,21 @@ func WithHeader(key, value string) RequestOption {
 
 // WithQuery appends query parameters to the request URL.
 func WithQuery(values url.Values) RequestOption {
-	return func(c *requestConfig) { c.query = values }
+	return func(c *requestConfig) {
+		if c.query == nil {
+			c.query = url.Values{}
+		}
+		for key, values := range values {
+			c.query[key] = append(c.query[key], values...)
+		}
+	}
+}
+
+// WithAllowEmptyResponse permits an empty or whitespace-only successful body
+// and returns the response type's zero value. HEAD, 204, and 205 responses always
+// permit empty bodies; other successful responses require one JSON value.
+func WithAllowEmptyResponse() RequestOption {
+	return func(c *requestConfig) { c.allowEmptyResponse = true }
 }
 
 // WithRawBody sends the given reader as the request body instead of a
@@ -223,6 +254,9 @@ func doRequest[Resp any](
 		return zero, fmt.Errorf("kakashi: invalid base URL: %w", err)
 	}
 	if path != "" {
+		if _, err := url.PathUnescape(path); err != nil {
+			return zero, fmt.Errorf("kakashi: invalid endpoint path: %w", err)
+		}
 		u = u.JoinPath(path)
 	}
 	if len(cfg.query) > 0 {
@@ -268,31 +302,44 @@ func doRequest[Resp any](
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			redacted := *urlErr
+			redacted.URL = safeURL(urlErr.URL)
+			err = &redacted
+		}
 		return zero, fmt.Errorf("kakashi: request: %w", err)
 	}
-	defer func() {
-		// Drain to allow connection reuse, then close.
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	// Fully consumed bodies can be reused by the transport. Close unread bodies
+	// without draining: cleanup must not wait for an unbounded or stalled stream.
+	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		return zero, &APIError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
-			URL:        u.String(),
+			URL:        safeURL(u.String()),
 			Body:       b,
 		}
 	}
+	if method == MethodHead || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
+		return zero, nil
+	}
 
 	var result Resp
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		if errors.Is(err, io.EOF) {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&result); err != nil {
+		if errors.Is(err, io.EOF) && cfg.allowEmptyResponse {
 			return zero, nil
 		}
 		return zero, fmt.Errorf("kakashi: decode response: %w", err)
 	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return zero, fmt.Errorf("kakashi: trailing response data: %w", err)
+	}
 	return result, nil
 }
-

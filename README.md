@@ -22,15 +22,18 @@ typed `*APIError`, so callers can `errors.As` instead of string-matching.
 - Strongly-typed request and response bodies via Go generics.
 - `context.Context` on every call.
 - Typed `*APIError` carrying status code, status text, URL, and (bounded)
-  body — switch on it with `errors.As`.
+  body — switch on it with `errors.As`. Error URLs omit user information,
+  query parameters, and fragments.
 - Functional options on `New` (`WithHTTPClient`, `WithTimeout`,
   `WithDefaultHeader`).
-- Per-request options (`WithHeader`, `WithQuery`, `WithRawBody`).
+- Per-request options (`WithHeader`, `WithQuery`, `WithRawBody`,
+  `WithAllowEmptyResponse`).
 - URL composition via `(*url.URL).JoinPath` — no `//` or missing-slash bugs.
-- Streaming `json.Decoder` on success, `io.LimitReader`-capped reads on
-  errors.
-- Drains the response body before close so the underlying connection can be
-  reused.
+- Successful responses require exactly one JSON value, with optional trailing
+  whitespace. Error body reads are capped with `io.LimitReader`.
+- Closes responses without draining unread data. Fully consumed responses can
+  reuse their connections; oversized errors sacrifice reuse to avoid waiting
+  for an unbounded response tail.
 - Closed-set HTTP method validation at endpoint construction — typos panic
   at package init, not at request time.
 - Zero runtime dependencies.
@@ -106,6 +109,11 @@ client := kakashi.New(
 )
 ```
 
+`WithHTTPClient` copies the supplied client's configuration while sharing its
+transport and cookie jar. `WithTimeout` therefore does not change the supplied
+client or other wrappers. Options apply in order: place `WithTimeout` after
+`WithHTTPClient` to override the supplied timeout.
+
 ### Per-request options
 
 ```go
@@ -114,6 +122,19 @@ users, err := kakashi.Call(ctx, client, GetUsers,
     kakashi.WithHeader("X-Request-ID", reqID),
 )
 ```
+
+Repeated `WithQuery` options append values to one another and to the base URL's
+query parameters. Endpoint paths must contain valid percent escapes; for example,
+a literal percent sign must be written as `%25`.
+
+### Empty responses
+
+HEAD requests and responses with status 204 or 205 return the response type's zero
+value without decoding a body. Other successful responses must contain exactly
+one JSON value. To allow an endpoint that legitimately returns an empty or
+whitespace-only body with another successful status, pass
+`kakashi.WithAllowEmptyResponse()`. This option still rejects malformed JSON and
+multiple JSON values.
 
 ### Typed error handling
 
@@ -133,7 +154,9 @@ if errors.As(err, &apiErr) {
 ```
 
 The response body on `APIError.Body` is read with a 64 KiB cap so a verbose
-HTML 500 page can't blow up logs.
+HTML 500 page can't blow up logs. The remaining body is closed without draining.
+`APIError.URL` and its error string omit URL user information, query parameters,
+and fragments; outgoing request authentication and query parameters are unchanged.
 
 ### Sending a raw (non-JSON) body
 
@@ -219,6 +242,7 @@ func WithDefaultHeader(key, value string) Option
 func WithHeader(key, value string) RequestOption
 func WithQuery(values url.Values) RequestOption
 func WithRawBody(r io.Reader, contentType string) RequestOption
+func WithAllowEmptyResponse() RequestOption
 ```
 
 ## Testing
