@@ -285,3 +285,12 @@ file for details.
 ## Author
 
 Iordanis Paschalidis — [@junkd0g](https://github.com/junkd0g)
+
+
+### Command and health endpoints
+
+For endpoints whose success body is irrelevant, `WithDiscardResponse()` closes
+it without decoding or draining it. `WithExpectedStatus(http.StatusOK)` restricts
+success to that exact status; other statuses produce the same typed `APIError`
+as normal non-2xx responses. Combine these options to preserve a legacy write
+or health endpoint contract while retaining typed request encoding.

@@ -175,6 +175,8 @@ type requestConfig struct {
 	rawBody            io.Reader
 	rawCT              string
 	allowEmptyResponse bool
+	discardResponse    bool
+	expectedStatus     int
 }
 
 // WithHeader sets a header on a single request, overriding any client default.
@@ -204,6 +206,15 @@ func WithQuery(values url.Values) RequestOption {
 // permit empty bodies; other successful responses require one JSON value.
 func WithAllowEmptyResponse() RequestOption {
 	return func(c *requestConfig) { c.allowEmptyResponse = true }
+}
+
+// WithDiscardResponse ignores successful response bodies, for command or health endpoints.
+// The response is closed without draining, just as an unread oversized error is.
+func WithDiscardResponse() RequestOption { return func(c *requestConfig) { c.discardResponse = true } }
+
+// WithExpectedStatus requires one exact HTTP success status instead of any 2xx.
+func WithExpectedStatus(status int) RequestOption {
+	return func(c *requestConfig) { c.expectedStatus = status }
 }
 
 // WithRawBody sends the given reader as the request body instead of a
@@ -314,7 +325,7 @@ func doRequest[Resp any](
 	// without draining: cleanup must not wait for an unbounded or stalled stream.
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (cfg.expectedStatus != 0 && resp.StatusCode != cfg.expectedStatus) {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		return zero, &APIError{
 			StatusCode: resp.StatusCode,
@@ -323,7 +334,7 @@ func doRequest[Resp any](
 			Body:       b,
 		}
 	}
-	if method == MethodHead || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
+	if cfg.discardResponse || method == MethodHead || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
 		return zero, nil
 	}
 
